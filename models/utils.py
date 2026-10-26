@@ -4,7 +4,8 @@ from scipy.sparse import csr_matrix
 
 
 def interactions_to_csr(
-    interactions: pl.DataFrame, user_col: str = "user_id", item_col: str = "item_id",
+    interactions: pl.DataFrame,
+    user_col: str = "user_id", item_col: str = "item_id",
 ) -> tuple[csr_matrix, np.ndarray, np.ndarray, dict[int, int], dict[int, int]]:
     user_ids = interactions[user_col].unique().sort().to_numpy()
     item_ids = interactions[item_col].unique().sort().to_numpy()
@@ -60,7 +61,6 @@ def top_k_unseen(
         selected = np.concatenate([above, tied[:k - above.size]])
     else:
         selected = candidates
-
     order = np.lexsort((selected, -scores[selected]))
     return selected[order]
 
@@ -71,6 +71,7 @@ def recall_at_k(
     relevant_set = set(relevant)
     if not relevant_set:
         raise ValueError
+
     return len(set(recommended[:k]) & relevant_set) / len(relevant_set)
 
 
@@ -80,6 +81,7 @@ def ndcg_at_k(
     relevant_set = set(relevant)
     if not relevant_set:
         raise ValueError
+
     dcg = sum(
         1.0 / np.log2(rank + 2)
         for rank, item_index in enumerate(recommended[:k])
@@ -88,3 +90,55 @@ def ndcg_at_k(
     ideal_len = min(k, len(relevant_set))
     idcg = sum(1.0 / np.log2(rank + 2) for rank in range(ideal_len))
     return float(dcg / idcg)
+
+
+def evaluate(
+    model: object, evaluation: pl.DataFrame, seen_matrix: csr_matrix,
+    user_to_index: dict[int, int], item_to_index: dict[int, int],
+    user_col: str = "user_id", item_col: str = "item_id", k: int = 10,
+) -> tuple[pl.DataFrame, pl.DataFrame]:
+    if evaluation[user_col].n_unique() != evaluation.height:
+        raise ValueError
+
+    rows = []
+    for user_id, item_id in evaluation.select(user_col, item_col).iter_rows():
+        user_id, item_id = int(user_id), int(item_id)
+        if user_id not in user_to_index or item_id not in item_to_index:
+            raise ValueError
+
+        user_index = user_to_index[user_id]
+        target_index = item_to_index[item_id]
+        seen_indices = seen_matrix.getrow(user_index).indices
+        if target_index in seen_indices:
+            raise ValueError
+
+        scores = np.asarray(model.scores(user_index), dtype=float)
+        if scores.shape != (seen_matrix.shape[1],):
+            raise ValueError
+
+        recommended = top_k_unseen(scores, seen_indices, k=k)
+        matches = np.flatnonzero(recommended == target_index)
+        rank = int(matches[0] + 1) if matches.size else None
+        relevant = {target_index}
+        rows.append({
+            user_col: user_id,
+            "rank": rank,
+            f"Recall@{k}": recall_at_k(recommended, relevant, k=k),
+            f"NDCG@{k}": ndcg_at_k(recommended, relevant, k=k),
+        })
+    details = pl.DataFrame(rows)
+    summary = details.select(
+        pl.len().alias("users"),
+        pl.col(f"Recall@{k}").mean(),
+        pl.col(f"NDCG@{k}").mean(),
+    )
+    return summary, details
+
+
+class Popularity:
+    def fit(self, interactions: csr_matrix) -> "Popularity":
+        self.item_scores = np.asarray(interactions.sum(axis=0)).ravel()
+        return self
+
+    def scores(self, user_idx: int) -> np.ndarray:
+        return self.item_scores
