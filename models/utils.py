@@ -1,3 +1,4 @@
+import time
 import numpy as np
 import polars as pl
 from scipy.sparse import csr_matrix
@@ -133,6 +134,47 @@ def evaluate(
         pl.col(f"NDCG@{k}").mean(),
     )
     return summary, details
+
+
+def run_grid_search(
+    model_class: type, model_name: str, configs: list[dict], fit_args: tuple,
+    evaluation: pl.DataFrame, seen_matrix: csr_matrix,
+    user_to_index: dict[int, int], item_to_index: dict[int, int], k: int = 10,
+) -> tuple[list[dict], object, dict, pl.DataFrame]:
+    rows = []
+    best_score = -np.inf
+    for config_number, parameters in enumerate(configs, start=1):
+        print(f"{model_name} {config_number}/{len(configs)}: {parameters}")
+
+        started = time.perf_counter()
+        model = model_class(**parameters).fit(*fit_args)
+        fit_seconds = time.perf_counter() - started
+
+        started = time.perf_counter()
+        metrics, details = evaluate(
+            model, evaluation, seen_matrix,
+            user_to_index, item_to_index, k=k,
+        )
+        eval_seconds = time.perf_counter() - started
+
+        row = {
+            "model": model_name,
+            "parameters": str(parameters),
+            "fit_sec": round(fit_seconds, 3),
+            "eval_sec": round(eval_seconds, 3),
+            **metrics.row(0, named=True),
+        }
+        rows.append(row)
+        if row[f"NDCG@{k}"] > best_score:
+            best_score = row[f"NDCG@{k}"]
+            best_model = model
+            best_parameters = parameters.copy()
+            best_details = details
+        print(
+            f"  NDCG@{k}={row[f'NDCG@{k}']:.4f}, "
+            f"Recall@{k}={row[f'Recall@{k}']:.4f}"
+        )
+    return rows, best_model, best_parameters, best_details
 
 
 class Popularity:
