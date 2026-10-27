@@ -127,7 +127,7 @@ def evaluate(
             f"Recall@{k}": recall_at_k(recommended, relevant, k=k),
             f"NDCG@{k}": ndcg_at_k(recommended, relevant, k=k),
         })
-    details = pl.DataFrame(rows)
+    details = pl.DataFrame(rows, infer_schema_length=None)
     summary = details.select(
         pl.len().alias("users"),
         pl.col(f"Recall@{k}").mean(),
